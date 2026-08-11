@@ -114,6 +114,54 @@ button { font-family: 'Overpass', sans-serif; }
 }
 .card-sub { font-size: 14px; color: var(--gray); margin: 0 0 20px; }
 
+/* ===== Dropzone ===== */
+.dropzone {
+  border: 2px dashed var(--gray-light);
+  border-radius: 12px;
+  padding: 34px 20px;
+  text-align: center;
+  background: var(--panel);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.dropzone.dragover {
+  border-color: var(--orange);
+  background: var(--orange-tint-2);
+}
+.dropzone-text {
+  font-size: 15.5px;
+  color: var(--slate);
+  margin-bottom: 10px;
+}
+.dropzone-or {
+  font-size: 12px;
+  color: var(--gray);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 10px;
+}
+
+.queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 20px 0 12px;
+  font-size: 14px;
+  color: var(--slate-soft);
+}
+
+.remove-btn {
+  flex-shrink: 0;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--gray);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.remove-btn:hover { background: var(--red-tint); color: var(--red); }
+
 /* ===== Folder picker rows ===== */
 .folder-row {
   display: flex;

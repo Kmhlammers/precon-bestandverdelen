@@ -5,14 +5,13 @@
 const app = document.getElementById("app");
 
 const ARTIKEL_REGEX = /^\s*(\d{2,}(?:[.\-_]\d+)+|\d{4,})/;
-const INBOX_NAAM = "01_INBOX";
 const NIET_VERWERKT_NAAM = "02_NIET_VERWERKT";
 const MAX_RECENT = 5;
 
 const state = {
-  bronHandle: null,
   doelHandle: null,
   recentDoel: [], // [{name, handle}]
+  wachtrij: [], // File[]
 };
 
 // ===== IndexedDB opslag (bewaart de daadwerkelijke maptoegang, geen paden) =====
@@ -103,21 +102,10 @@ async function sameContent(fileA, fileB) {
   return a === b;
 }
 
-async function listDirFileNames(dirHandle) {
-  const out = [];
-  for await (const [name, handle] of dirHandle.entries()) {
-    if (handle.kind === "file") out.push(name);
-  }
-  return out.sort();
-}
-
-async function moveFile(sourceDirHandle, sourceName, destDirHandle, destName) {
-  const srcFileHandle = await sourceDirHandle.getFileHandle(sourceName);
-  const srcFile = await srcFileHandle.getFile();
-  const destFileHandle = await destDirHandle.getFileHandle(destName, { create: true });
-  const writable = await destFileHandle.createWritable();
-  await srcFile.stream().pipeTo(writable);
-  await sourceDirHandle.removeEntry(sourceName);
+async function writeFile(dirHandle, name, file) {
+  const fileHandle = await dirHandle.getFileHandle(name, { create: true });
+  const writable = await fileHandle.createWritable();
+  await file.stream().pipeTo(writable);
 }
 
 function escapeHtml(s) {
@@ -126,10 +114,67 @@ function escapeHtml(s) {
   }[c]));
 }
 
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ===== Bestanden verzamelen (drag-and-drop, ook mappen) =====
+
+function readAllEntries(reader) {
+  return new Promise((resolve, reject) => {
+    const all = [];
+    const readBatch = () => {
+      reader.readEntries((batch) => {
+        if (!batch.length) { resolve(all); return; }
+        all.push(...batch);
+        readBatch();
+      }, reject);
+    };
+    readBatch();
+  });
+}
+
+async function walkEntry(entry, out) {
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+    out.push(file);
+  } else if (entry.isDirectory) {
+    const reader = entry.createReader();
+    const kinderen = await readAllEntries(reader);
+    for (const kind of kinderen) await walkEntry(kind, out);
+  }
+}
+
+async function bestandenUitDataTransfer(dataTransfer) {
+  const out = [];
+  const items = Array.from(dataTransfer.items || []);
+  if (items.length && items[0].webkitGetAsEntry) {
+    const entries = items.map((item) => item.webkitGetAsEntry()).filter(Boolean);
+    for (const entry of entries) await walkEntry(entry, out);
+  } else {
+    out.push(...Array.from(dataTransfer.files || []));
+  }
+  return out;
+}
+
+function voegBestandenToe(nieuw) {
+  const bestaand = new Set(state.wachtrij.map((f) => `${f.name}::${f.size}`));
+  for (const f of nieuw) {
+    const sleutel = `${f.name}::${f.size}`;
+    if (!bestaand.has(sleutel)) {
+      state.wachtrij.push(f);
+      bestaand.add(sleutel);
+    }
+  }
+  renderSetup();
+}
+
 // ===== Verdeel-logica (poort van Bestanden_Verdelen_V7.ps1) =====
 
-async function processFile(item, doelHandle, nietVerwerktHandle, counts, log) {
-  const { name, dirHandle, inNietVerwerkt } = item;
+async function processFile(file, doelHandle, nietVerwerktHandle, counts, log) {
+  const name = file.name;
   try {
     const { base } = splitName(name);
     const match = base.match(ARTIKEL_REGEX);
@@ -139,35 +184,29 @@ async function processFile(item, doelHandle, nietVerwerktHandle, counts, log) {
       const artikelDir = await doelHandle.getDirectoryHandle(artikelcode, { create: true });
 
       if (!(await fileExists(artikelDir, name))) {
-        await moveFile(dirHandle, name, artikelDir, name);
+        await writeFile(artikelDir, name, file);
         counts.verdeeld++;
         log(name, "verdeeld", `naar map ${artikelcode}`);
         return;
       }
 
       const destFile = await (await artikelDir.getFileHandle(name)).getFile();
-      const srcFile = await (await dirHandle.getFileHandle(name)).getFile();
 
-      if (await sameContent(srcFile, destFile)) {
-        await dirHandle.removeEntry(name);
+      if (await sameContent(file, destFile)) {
         counts.dubbel++;
-        log(name, "dubbel", "identiek bestand bestond al, verwijderd");
+        log(name, "dubbel", `identiek bestand stond al in map ${artikelcode}, overgeslagen`);
       } else {
-        if (!inNietVerwerkt) {
-          const conflictNaam = `${splitName(name).base} - CONFLICT${splitName(name).ext}`;
-          const uniekeNaam = await getUniqueFileName(nietVerwerktHandle, conflictNaam);
-          await moveFile(dirHandle, name, nietVerwerktHandle, uniekeNaam);
-        }
+        const conflictNaam = `${splitName(name).base} - CONFLICT${splitName(name).ext}`;
+        const uniekeNaam = await getUniqueFileName(nietVerwerktHandle, conflictNaam);
+        await writeFile(nietVerwerktHandle, uniekeNaam, file);
         counts.conflict++;
         log(name, "conflict", `bestand met dezelfde naam bestaat al in map ${artikelcode}`);
       }
       return;
     }
 
-    if (!inNietVerwerkt) {
-      const uniekeNaam = await getUniqueFileName(nietVerwerktHandle, name);
-      await moveFile(dirHandle, name, nietVerwerktHandle, uniekeNaam);
-    }
+    const uniekeNaam = await getUniqueFileName(nietVerwerktHandle, name);
+    await writeFile(nietVerwerktHandle, uniekeNaam, file);
     counts.nietVerwerkt++;
     log(name, "nietverwerkt", "geen artikelcode herkend in bestandsnaam");
   } catch (e) {
@@ -192,29 +231,41 @@ function renderUnsupported() {
 }
 
 async function renderSetup(opts = {}) {
-  const bronOk = state.bronHandle && (await verifyPermission(state.bronHandle, false));
   const doelOk = state.doelHandle && (await verifyPermission(state.doelHandle, false));
 
   setView(`
     <div class="intro">
       <h1>Bestanden automatisch verdelen</h1>
-      <p>Kies de map met binnengekomen bestanden en de map waarin artikelmappen worden aangemaakt. Bestandverdelen sorteert daarna alles op artikelcode.</p>
+      <p>Sleep bestanden hierheen (of een hele map) en kies waar de artikelmappen moeten komen. Bestandverdelen sorteert daarna alles op artikelcode.</p>
     </div>
 
     ${opts.melding ? `<div class="notice notice-error">${escapeHtml(opts.melding)}</div>` : ""}
 
     <div class="card">
       <div class="card-body">
-        <div class="card-title">Stap 1 — Bronmap</div>
-        <p class="card-sub">De map waarin ${INBOX_NAAM} en ${NIET_VERWERKT_NAAM} staan (of worden aangemaakt).</p>
-        <div class="folder-row">
-          <div class="folder-icon">1</div>
-          <div class="folder-info">
-            <div class="folder-label">Huidige bronmap</div>
-            <div class="folder-path ${bronOk ? "" : "empty"}">${bronOk ? escapeHtml(state.bronHandle.name) : "Nog geen map gekozen"}</div>
-          </div>
-          <button class="btn btn-outline btn-sm" id="btnKiesBron">${bronOk ? "Wijzigen" : "Kiezen…"}</button>
+        <div class="card-title">Stap 1 — Bestanden toevoegen</div>
+        <p class="card-sub">Sleep bestanden of mappen naar het vak, of kies ze handmatig.</p>
+        <div class="dropzone" id="dropzone">
+          <div class="dropzone-text">Sleep bestanden of een map hierheen</div>
+          <div class="dropzone-or">of</div>
+          <button class="btn btn-outline btn-sm" id="btnBrowse">Bestanden kiezen…</button>
+          <input type="file" id="fileInput" multiple hidden />
         </div>
+        ${state.wachtrij.length ? `
+          <div class="queue-header">
+            <span>${state.wachtrij.length} bestand${state.wachtrij.length === 1 ? "" : "en"} klaar om te verdelen</span>
+            <button class="btn btn-ghost btn-sm" id="btnWisWachtrij">Lijst wissen</button>
+          </div>
+          <div class="progress-list">
+            ${state.wachtrij.map((f, i) => `
+              <div class="progress-item">
+                <span class="name">${escapeHtml(f.name)}</span>
+                <span class="tag tag-dubbel">${formatSize(f.size)}</span>
+                <button class="remove-btn" data-remove="${i}" title="Verwijderen">×</button>
+              </div>
+            `).join("")}
+          </div>
+        ` : ""}
       </div>
     </div>
 
@@ -240,28 +291,40 @@ async function renderSetup(opts = {}) {
     </div>
 
     <div class="actions-row">
-      <button class="btn btn-primary" id="btnStart" ${bronOk && doelOk ? "" : "disabled"}>Start verdelen</button>
+      <button class="btn btn-primary" id="btnStart" ${state.wachtrij.length && doelOk ? "" : "disabled"}>Start verdelen</button>
     </div>
   `);
 
-  document.getElementById("btnKiesBron").addEventListener("click", kiesBron);
+  const dropzone = document.getElementById("dropzone");
+  dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+  dropzone.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+    const bestanden = await bestandenUitDataTransfer(e.dataTransfer);
+    voegBestandenToe(bestanden);
+  });
+
+  document.getElementById("btnBrowse").addEventListener("click", () => document.getElementById("fileInput").click());
+  document.getElementById("fileInput").addEventListener("change", (e) => {
+    voegBestandenToe(Array.from(e.target.files || []));
+  });
+
+  document.querySelectorAll("[data-remove]").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.wachtrij.splice(Number(el.dataset.remove), 1);
+      renderSetup();
+    });
+  });
+  const wisBtn = document.getElementById("btnWisWachtrij");
+  if (wisBtn) wisBtn.addEventListener("click", () => { state.wachtrij = []; renderSetup(); });
+
   document.getElementById("btnKiesDoel").addEventListener("click", kiesDoel);
   document.querySelectorAll("[data-recent]").forEach((el) => {
     el.addEventListener("click", () => kiesRecentDoel(Number(el.dataset.recent)));
   });
   const startBtn = document.getElementById("btnStart");
   if (startBtn) startBtn.addEventListener("click", startVerdelen);
-}
-
-async function kiesBron() {
-  try {
-    const handle = await window.showDirectoryPicker({ id: "bestandverdelen-bron", mode: "readwrite" });
-    state.bronHandle = handle;
-    await idbSet("bronHandle", handle);
-    renderSetup();
-  } catch (e) {
-    if (e.name !== "AbortError") renderSetup({ melding: `Kon bronmap niet instellen: ${e.message}` });
-  }
 }
 
 async function kiesDoel() {
@@ -317,7 +380,7 @@ function renderRunning(counts, huidig, totaal) {
         </div>
         <div class="stat-grid">
           <div class="stat-tile"><div class="num">${counts.verdeeld}</div><div class="lbl">Verdeeld</div></div>
-          <div class="stat-tile"><div class="num">${counts.dubbel}</div><div class="lbl">Dubbel verwijderd</div></div>
+          <div class="stat-tile"><div class="num">${counts.dubbel}</div><div class="lbl">Dubbel overgeslagen</div></div>
           <div class="stat-tile warn"><div class="num">${counts.nietVerwerkt}</div><div class="lbl">Niet verwerkt</div></div>
           <div class="stat-tile warn"><div class="num">${counts.conflict}</div><div class="lbl">Conflicten</div></div>
           <div class="stat-tile bad"><div class="num">${counts.fouten}</div><div class="lbl">Fouten</div></div>
@@ -353,35 +416,25 @@ function renderLogRegel(regel) {
 }
 
 async function startVerdelen() {
-  const bronOk = await verifyPermission(state.bronHandle, true);
   const doelOk = await verifyPermission(state.doelHandle, true);
-  if (!bronOk || !doelOk) {
-    renderSetup({ melding: "Toegang tot de bron- of doelmap is niet (meer) verleend. Kies de mappen opnieuw." });
+  if (!doelOk) {
+    renderSetup({ melding: "Toegang tot de doelmap is niet (meer) verleend. Kies de map opnieuw." });
     return;
   }
+  if (!state.wachtrij.length) return;
 
   logRegels = [];
   const counts = { verdeeld: 0, dubbel: 0, nietVerwerkt: 0, conflict: 0, fouten: 0 };
 
-  let inboxHandle, nietVerwerktHandle;
+  let nietVerwerktHandle;
   try {
-    inboxHandle = await state.bronHandle.getDirectoryHandle(INBOX_NAAM, { create: true });
-    nietVerwerktHandle = await state.bronHandle.getDirectoryHandle(NIET_VERWERKT_NAAM, { create: true });
+    nietVerwerktHandle = await state.doelHandle.getDirectoryHandle(NIET_VERWERKT_NAAM, { create: true });
   } catch (e) {
-    renderSetup({ melding: `Kon ${INBOX_NAAM}/${NIET_VERWERKT_NAAM} niet aanmaken in de bronmap: ${e.message}` });
+    renderSetup({ melding: `Kon ${NIET_VERWERKT_NAAM} niet aanmaken in de doelmap: ${e.message}` });
     return;
   }
 
-  const [inboxFiles, nietVerwerktFiles] = await Promise.all([
-    listDirFileNames(inboxHandle),
-    listDirFileNames(nietVerwerktHandle),
-  ]);
-
-  const wachtrij = [
-    ...inboxFiles.map((name) => ({ name, dirHandle: inboxHandle, inNietVerwerkt: false })),
-    ...nietVerwerktFiles.map((name) => ({ name, dirHandle: nietVerwerktHandle, inNietVerwerkt: true })),
-  ];
-
+  const wachtrij = state.wachtrij;
   renderRunning(counts, 0, wachtrij.length);
 
   const log = (name, tag, detail) => {
@@ -389,12 +442,13 @@ async function startVerdelen() {
   };
 
   let verwerkt = 0;
-  for (const item of wachtrij) {
-    await processFile(item, state.doelHandle, nietVerwerktHandle, counts, log);
+  for (const file of wachtrij) {
+    await processFile(file, state.doelHandle, nietVerwerktHandle, counts, log);
     verwerkt++;
     renderRunning(counts, verwerkt, wachtrij.length);
   }
 
+  state.wachtrij = [];
   renderResult(counts, wachtrij.length);
 }
 
@@ -403,18 +457,14 @@ function renderResult(counts, totaal) {
   let titel = "Het is gelukt";
   let sub = "Alle bestanden zijn verdeeld.";
 
-  if (totaal === 0) {
-    banner = "partial";
-    titel = "Geen bestanden gevonden";
-    sub = `${INBOX_NAAM} en ${NIET_VERWERKT_NAAM} waren leeg.`;
-  } else if (counts.fouten > 0) {
+  if (counts.fouten > 0) {
     banner = "error";
     titel = "Er zijn fouten opgetreden";
     sub = "Bekijk de details hieronder.";
   } else if (counts.nietVerwerkt > 0 || counts.conflict > 0) {
     banner = "partial";
     titel = "Het is deels gelukt";
-    sub = `Controleer de map ${NIET_VERWERKT_NAAM}.`;
+    sub = `Controleer de map ${NIET_VERWERKT_NAAM} in de doelmap.`;
   }
 
   const icon = banner === "success" ? "✓" : banner === "partial" ? "!" : "✕";
@@ -434,7 +484,7 @@ function renderResult(counts, totaal) {
         <div class="card-title">Doelmap: ${escapeHtml(state.doelHandle.name)}</div>
         <div class="stat-grid">
           <div class="stat-tile"><div class="num">${counts.verdeeld}</div><div class="lbl">Verdeeld</div></div>
-          <div class="stat-tile"><div class="num">${counts.dubbel}</div><div class="lbl">Dubbel verwijderd</div></div>
+          <div class="stat-tile"><div class="num">${counts.dubbel}</div><div class="lbl">Dubbel overgeslagen</div></div>
           <div class="stat-tile warn"><div class="num">${counts.nietVerwerkt}</div><div class="lbl">Niet verwerkt</div></div>
           <div class="stat-tile warn"><div class="num">${counts.conflict}</div><div class="lbl">Conflicten</div></div>
           <div class="stat-tile bad"><div class="num">${counts.fouten}</div><div class="lbl">Fouten</div></div>
@@ -454,12 +504,12 @@ function renderResult(counts, totaal) {
     ` : ""}
 
     <div class="actions-row">
-      <button class="btn btn-primary" id="btnOpnieuw">Opnieuw verdelen</button>
-      <button class="btn btn-ghost" id="btnWijzig">Bron- of doelmap wijzigen</button>
+      <button class="btn btn-primary" id="btnNieuwe">Meer bestanden verdelen</button>
+      <button class="btn btn-ghost" id="btnWijzig">Doelmap wijzigen</button>
     </div>
   `);
 
-  document.getElementById("btnOpnieuw").addEventListener("click", startVerdelen);
+  document.getElementById("btnNieuwe").addEventListener("click", () => renderSetup());
   document.getElementById("btnWijzig").addEventListener("click", () => renderSetup());
 }
 
@@ -472,12 +522,10 @@ async function init() {
   }
 
   try {
-    const [bron, doel, recent] = await Promise.all([
-      idbGet("bronHandle"),
+    const [doel, recent] = await Promise.all([
       idbGet("doelHandle"),
       idbGet("recentDoel"),
     ]);
-    state.bronHandle = bron || null;
     state.doelHandle = doel || null;
     state.recentDoel = recent || [];
   } catch (e) {
