@@ -380,6 +380,7 @@ function renderRunning(counts, huidig, totaal) {
         </div>
       </div>
     </div>
+    ${renderAandachtCard()}
     <div class="card">
       <div class="card-body">
         <div class="card-title" style="margin-bottom:14px;">Laatste bestanden</div>
@@ -406,6 +407,26 @@ function renderLogRegel(regel) {
       <span class="name" title="${escapeHtml(regel.detail)}">${escapeHtml(regel.name)}</span>
       <span class="tag tag-${regel.tag}">${TAG_LABEL[regel.tag]}</span>
       ${regel.file ? `<button class="btn btn-outline btn-sm" data-download-idx="${logRegels.indexOf(regel)}">Download</button>` : ""}
+    </div>
+  `;
+}
+
+function aandachtRegels() {
+  return logRegels.filter((r) => r.tag !== "verdeeld" && r.tag !== "dubbel");
+}
+
+function renderAandachtCard() {
+  const regels = aandachtRegels();
+  if (!regels.length) return "";
+  return `
+    <div class="card card-attention">
+      <div class="card-body">
+        <div class="card-title">Aandacht nodig (${regels.length})</div>
+        <p class="card-sub">Deze bestanden zijn niet automatisch verdeeld. Download ze en verwerk ze zelf.</p>
+        <div class="progress-list">
+          ${regels.slice().reverse().map(renderLogRegel).join("")}
+        </div>
+      </div>
     </div>
   `;
 }
@@ -488,10 +509,12 @@ function renderResult(counts, totaal) {
       </div>
     </div>
 
+    ${renderAandachtCard()}
+
     ${logRegels.length ? `
       <div class="card">
         <div class="card-body">
-          <div class="card-title" style="margin-bottom:14px;">Overzicht (${logRegels.length})</div>
+          <div class="card-title" style="margin-bottom:14px;">Volledig overzicht (${logRegels.length})</div>
           <div class="progress-list">
             ${logRegels.slice().reverse().map(renderLogRegel).join("")}
           </div>

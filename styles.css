@@ -104,6 +104,8 @@ button { font-family: 'Overpass', sans-serif; }
   overflow: hidden;
 }
 .card + .card { margin-top: 20px; }
+.card-attention { border-color: var(--orange-soft); box-shadow: 0 8px 24px rgba(250,100,1,0.10); }
+.card-attention .card-title { color: var(--orange-deep); }
 .card-body { padding: 26px 30px; }
 .card-title {
   font-family: 'Libre Baskerville', serif;
