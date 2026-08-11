@@ -11,8 +11,7 @@ De app gebruikt de File System Access API van de browser om rechtstreeks te schr
 3. **Start verdelen** — verwerkt alle toegevoegde bestanden:
    - Bestandsnaam begint met een artikelcode → weggeschreven naar `<doelmap>/<artikelcode>/`.
    - Bestand met dezelfde naam bestaat al in die artikelmap en is identiek → overgeslagen (duplicaat).
-   - Bestand met dezelfde naam bestaat al maar is anders → naar `<doelmap>/02_NIET_VERWERKT` als `... - CONFLICT`.
-   - Geen artikelcode herkend → naar `<doelmap>/02_NIET_VERWERKT`.
+   - Bestand met dezelfde naam bestaat al maar is anders (conflict), of er is geen artikelcode herkend → blijft **in de app** staan met een downloadknop, zodat je het zelf ergens kunt opslaan. Er wordt geen `NIET_VERWERKT`-map op de schijf aangemaakt.
 
 De gekozen doelmap wordt onthouden (via IndexedDB) zodat je de volgende keer niet opnieuw hoeft te bladeren.
 

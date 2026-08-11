@@ -5,7 +5,6 @@
 const app = document.getElementById("app");
 
 const ARTIKEL_REGEX = /^\s*(\d{2,}(?:[.\-_]\d+)+|\d{4,})/;
-const NIET_VERWERKT_NAAM = "02_NIET_VERWERKT";
 const MAX_RECENT = 5;
 
 const state = {
@@ -78,18 +77,6 @@ function splitName(filename) {
   return { base: filename.slice(0, idx), ext: filename.slice(idx) };
 }
 
-async function getUniqueFileName(dirHandle, filename) {
-  if (!(await fileExists(dirHandle, filename))) return filename;
-  const { base, ext } = splitName(filename);
-  let n = 2;
-  let candidate;
-  do {
-    candidate = `${base} (${n})${ext}`;
-    n++;
-  } while (await fileExists(dirHandle, candidate));
-  return candidate;
-}
-
 async function hashFile(file) {
   const buf = await file.arrayBuffer();
   const digest = await crypto.subtle.digest("SHA-256", buf);
@@ -112,6 +99,17 @@ function escapeHtml(s) {
   return (s || "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
+}
+
+function downloadFile(file) {
+  const url = URL.createObjectURL(file);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = file.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function formatSize(bytes) {
@@ -173,7 +171,7 @@ function voegBestandenToe(nieuw) {
 
 // ===== Verdeel-logica (poort van Bestanden_Verdelen_V7.ps1) =====
 
-async function processFile(file, doelHandle, nietVerwerktHandle, counts, log) {
+async function processFile(file, doelHandle, counts, log) {
   const name = file.name;
   try {
     const { base } = splitName(name);
@@ -196,22 +194,17 @@ async function processFile(file, doelHandle, nietVerwerktHandle, counts, log) {
         counts.dubbel++;
         log(name, "dubbel", `identiek bestand stond al in map ${artikelcode}, overgeslagen`);
       } else {
-        const conflictNaam = `${splitName(name).base} - CONFLICT${splitName(name).ext}`;
-        const uniekeNaam = await getUniqueFileName(nietVerwerktHandle, conflictNaam);
-        await writeFile(nietVerwerktHandle, uniekeNaam, file);
         counts.conflict++;
-        log(name, "conflict", `bestand met dezelfde naam bestaat al in map ${artikelcode}`);
+        log(name, "conflict", `bestand met dezelfde naam bestaat al in map ${artikelcode} en verschilt — download het hieronder`, file);
       }
       return;
     }
 
-    const uniekeNaam = await getUniqueFileName(nietVerwerktHandle, name);
-    await writeFile(nietVerwerktHandle, uniekeNaam, file);
     counts.nietVerwerkt++;
-    log(name, "nietverwerkt", "geen artikelcode herkend in bestandsnaam");
+    log(name, "nietverwerkt", "geen artikelcode herkend in bestandsnaam — download het hieronder", file);
   } catch (e) {
     counts.fouten++;
-    log(name, "fout", e.message || String(e));
+    log(name, "fout", e.message || String(e), file);
   }
 }
 
@@ -396,6 +389,7 @@ function renderRunning(counts, huidig, totaal) {
       </div>
     </div>
   `);
+  bindDownloadKnoppen();
 }
 
 const TAG_LABEL = {
@@ -411,8 +405,18 @@ function renderLogRegel(regel) {
     <div class="progress-item">
       <span class="name" title="${escapeHtml(regel.detail)}">${escapeHtml(regel.name)}</span>
       <span class="tag tag-${regel.tag}">${TAG_LABEL[regel.tag]}</span>
+      ${regel.file ? `<button class="btn btn-outline btn-sm" data-download-idx="${logRegels.indexOf(regel)}">Download</button>` : ""}
     </div>
   `;
+}
+
+function bindDownloadKnoppen() {
+  document.querySelectorAll("[data-download-idx]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const regel = logRegels[Number(btn.dataset.downloadIdx)];
+      if (regel && regel.file) downloadFile(regel.file);
+    });
+  });
 }
 
 async function startVerdelen() {
@@ -426,24 +430,16 @@ async function startVerdelen() {
   logRegels = [];
   const counts = { verdeeld: 0, dubbel: 0, nietVerwerkt: 0, conflict: 0, fouten: 0 };
 
-  let nietVerwerktHandle;
-  try {
-    nietVerwerktHandle = await state.doelHandle.getDirectoryHandle(NIET_VERWERKT_NAAM, { create: true });
-  } catch (e) {
-    renderSetup({ melding: `Kon ${NIET_VERWERKT_NAAM} niet aanmaken in de doelmap: ${e.message}` });
-    return;
-  }
-
   const wachtrij = state.wachtrij;
   renderRunning(counts, 0, wachtrij.length);
 
-  const log = (name, tag, detail) => {
-    logRegels.push({ name, tag, detail });
+  const log = (name, tag, detail, file) => {
+    logRegels.push({ name, tag, detail, file });
   };
 
   let verwerkt = 0;
   for (const file of wachtrij) {
-    await processFile(file, state.doelHandle, nietVerwerktHandle, counts, log);
+    await processFile(file, state.doelHandle, counts, log);
     verwerkt++;
     renderRunning(counts, verwerkt, wachtrij.length);
   }
@@ -464,7 +460,7 @@ function renderResult(counts, totaal) {
   } else if (counts.nietVerwerkt > 0 || counts.conflict > 0) {
     banner = "partial";
     titel = "Het is deels gelukt";
-    sub = `Controleer de map ${NIET_VERWERKT_NAAM} in de doelmap.`;
+    sub = "Download de bestanden hieronder om ze handmatig te verwerken.";
   }
 
   const icon = banner === "success" ? "✓" : banner === "partial" ? "!" : "✕";
@@ -509,6 +505,7 @@ function renderResult(counts, totaal) {
     </div>
   `);
 
+  bindDownloadKnoppen();
   document.getElementById("btnNieuwe").addEventListener("click", () => renderSetup());
   document.getElementById("btnWijzig").addEventListener("click", () => renderSetup());
 }
